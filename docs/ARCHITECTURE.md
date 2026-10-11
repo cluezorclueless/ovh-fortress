@@ -1,8 +1,7 @@
 # How it works
 
-Picture an apartment building. The internet is the street, and every packet of data
-is a visitor walking up to the door. The layers below are the building's security,
-from the road in to the apartment itself.
+Layered inbound controls for a single internet-exposed host. For a plain-language
+version of the same picture, see the README.
 
 
 ## The path a packet takes
