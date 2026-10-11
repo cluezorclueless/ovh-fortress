@@ -21,7 +21,7 @@ shows what each layer is dropping.
 
 Generic XDP only: virtio_net on this VPS has one queue and no native XDP.
 
-## Tested (BPF_PROG_TEST_RUN, forked workers, 650-800k pps)
+## Tested (BPF_PROG_TEST_RUN, forked workers, 555k-703k pps)
 These numbers come from `xdp/ftest.py`, which loads the compiled object through the
 real kernel verifier and replays synthetic packets with `BPF_PROG_TEST_RUN`. That
 measures the program's drop decisions at high packet rates. It is **not** a test
