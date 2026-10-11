@@ -28,18 +28,23 @@ measures the program's drop decisions at high packet rates. It is **not** a test
 on a live network or against a real stresser, and it does not include NIC or
 driver cost in generic XDP mode.
 
-| Flood | Dropped before nftables |
-|---|---|
-| TCP NULL | 100% |
-| UDP random ports | 95.7% |
-| UDP single source | 99.1% |
-| UDP to 41641 | 95.8% |
-| SYN | 99.9% |
-| Bare ACK | 94.2% |
+| Flood (5 s each) | Attack rate | Dropped in XDP | Your traffic during the flood |
+|---|---|---|---|
+| TCP NULL | 703k pps | 100.00% | all flows 100% |
+| UDP, random ports | 575k pps | 95.18% | voice-style UDP 6.0% (degraded) |
+| UDP, one source | 648k pps | 98.92% | all flows 100% |
+| UDP to 41641 | 555k pps | 95.02% | voice-style UDP 8.9% (degraded) |
+| SYN, forged sources | 662k pps | 99.89% | all flows 100% |
+| Bare ACK | 614k pps | 93.27% | upload ACKs 9.1% (degraded) |
 
-Legitimate tunnel, TCP data and DNS flows were unaffected (100% delivered).
-Voice-style UDP drops to ~5% delivered *during* a distributed UDP flood; see
-docs/TROUBLESHOOTING.md. 31/31 single-packet correctness cases pass.
+Full output: `docs/test-logs/ftest-v8.log` (kernel, compiler, SHA-256 of source and
+object are recorded at the top). Reproduce with the commands below.
+
+Honest reading: the filter drops 93-100% of attack traffic at 555k-703k pps, and
+tunnel, TCP download and DNS stay at 100%. During distributed UDP and ACK floods
+the ~5-7% that passes is shared between attack and legitimate traffic, so
+voice-style UDP and upload ACKs degrade. Fixing that needs a conntrack-fed trust
+map (listed under known gaps).
 
 ## Limits (be honest about them)
 - One VPS cannot absorb terabit floods. Volumetric protection is OVH's VAC.
