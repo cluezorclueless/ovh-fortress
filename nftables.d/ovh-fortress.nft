@@ -2,7 +2,7 @@
 define WAN = "ens3"
 define WG_IF = "wg0"
 define TS_IF = "tailscale0"
-define WG_PORT = 51820
+# WireGuard (UDP 51820) is not served on the WAN. zz-wgblock.nft drops it explicitly.
 define TS_PORT = 41641
 define WG_NET = 10.66.66.0/24
 define MC_PORT = 25565
@@ -74,7 +74,7 @@ table inet ovh_fortress {
         meta protocol ip tcp flags & (syn | ack) == syn meter wan_syn4 { ip saddr limit rate over 60/second burst 120 packets } update @flooders4 { ip saddr } counter drop comment "wan-syn-flood"
         meta protocol ip udp dport @bait_udp update @scanners4 { ip saddr } counter drop comment "wan-bait-udp"
         udp dport @bait_udp counter drop comment "wan-bait-udp6"
-        udp dport { 68, 51820, 41641, 546 } accept
+        udp dport { 68, 41641, 546 } accept
         meta protocol ip meta l4proto udp meter wan_udp4 { ip saddr limit rate over 200/second burst 400 packets } update @flooders4 { ip saddr } counter drop comment "wan-udp-flood"
         meta protocol ip6 meta l4proto udp meter wan_udp6 { ip6 saddr limit rate over 200/second burst 400 packets } counter drop comment "wan-udp-flood6"
     }
@@ -88,7 +88,7 @@ table inet ovh_fortress {
         iifname $WAN tcp flags psh ct state new update @flooders4 { ip saddr } counter drop comment "wan-psh-flood"
         tcp flags & (fin | syn | rst | ack) != syn ct state new counter drop comment "wan-nonsyn-new"
         ct state established,related counter accept
-        iifname $WAN meta l4proto udp ct state new udp dport != { 68, 51820, 41641 } update @scanners4 { ip saddr } counter drop comment "wan-udp-unsolicited"
+        iifname $WAN meta l4proto udp ct state new udp dport != { 68, 41641 } update @scanners4 { ip saddr } counter drop comment "wan-udp-unsolicited"
         iifname $WAN meta l4proto != { tcp, udp, icmp, ipv6-icmp } counter drop comment "wan-other-proto"
         iifname $WAN meta protocol ip udp sport 67 udp dport 68 counter accept
         iifname $WAN meta protocol ip6 udp sport 547 udp dport 546 counter accept
@@ -96,9 +96,6 @@ table inet ovh_fortress {
         iifname $WAN meta protocol ip icmp type echo-request limit rate 10/second burst 20 packets counter accept comment "wan-icmp-echo"
         iifname $WAN meta protocol ip6 icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } limit rate 200/second burst 400 packets counter accept
         iifname $WAN meta protocol ip6 icmpv6 type echo-request limit rate 10/second burst 20 packets counter accept
-        iifname $WAN meta protocol ip udp dport $WG_PORT meter wg4 { ip saddr limit rate over 3000/second burst 6000 packets } counter drop
-        iifname $WAN meta protocol ip6 udp dport $WG_PORT meter wg6 { ip6 saddr limit rate over 3000/second burst 6000 packets } counter drop
-        iifname $WAN udp dport $WG_PORT counter accept comment "wan-wireguard"
         iifname $WAN meta protocol ip udp dport $TS_PORT meter ts4 { ip saddr limit rate over 3000/second burst 6000 packets } counter drop
         iifname $WAN meta protocol ip6 udp dport $TS_PORT meter ts6 { ip6 saddr limit rate over 3000/second burst 6000 packets } counter drop
         iifname $WAN udp dport $TS_PORT counter accept comment "wan-tailscale"

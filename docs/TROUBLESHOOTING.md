@@ -41,5 +41,3 @@ the filter on or off, so the delay is on the access network, not the host.
 - nftables `wan_udp4` meter limits each source to 200 pps in the ingress chain;
   heavy single-server UDP (video) may hit it.
 - A conntrack-fed trust map would let your own UDP flows survive a UDP flood.
-- Dead `51820` entry remains in the wan_ingress UDP accept set (overridden by
-  the inserted drop).

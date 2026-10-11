@@ -64,7 +64,7 @@ All addresses in this repo are placeholders (203.0.113.10 = VPS public IP,
 | `fortress_xdp.c` compiles clean with `-Wall` | checked |
 | Verifier accepts the program | checked (1959 instructions) |
 | 31 single-packet correctness cases | passed |
-| `nft -c` on `ovh-fortress.nft` | passed |
+| `nft -c` on `ovh-fortress.nft`, alone and with `zz-wgblock.nft` | passed |
 | Python and shell syntax | checked |
 | systemd unit and sysctl files | run on the live VPS, not re-tested from this repo |
 | Real-world flood mitigation | observed on the VPS, not benchmarked |
