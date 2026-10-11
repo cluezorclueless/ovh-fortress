@@ -1,51 +1,55 @@
-# Architecture
+# How it works
 
-## Packet path (inbound on `ens3`)
+## The path a packet takes
     internet
-      -> OVH VAC (provider scrubbing, volumetric)
-      -> OVH Edge Network Firewall   stateless allow-list, 20 rules, IPv4 only
-      -> NIC (virtio_net, 1 queue)
-      -> XDP, generic mode           fortress_xdp.c, stateless, token buckets
-      -> netdev ingress (nftables)   chain wan_ingress, priority -500
-      -> conntrack
-      -> input / forward (nftables)  stateful, policy drop
+      -> OVH network protection and edge firewall
+      -> the network card
+      -> my XDP filter (fortress_xdp.c)
+      -> nftables early rules (chain wan_ingress)
+      -> connection tracking
+      -> nftables input and forward rules
+      -> the server
 
-Each layer drops cheaply what it can and leaves the rest to the next one.
-The earlier a packet dies, the less CPU it costs on a 2 vCPU host.
+Each layer drops what it can and passes the rest on. The earlier a bad packet
+dies, the less work my small 2-CPU server does for it.
 
-## Why each layer exists
-| Layer | Strength | Blind spot |
+## Why four layers
+| Layer | Good at | Can't do |
 |---|---|---|
-| OVH edge firewall | Drops before the VPS sees it | Stateless; does not see attackers inside OVH |
-| XDP | Cheapest host-side drop, per-source and shared rate limits | Stateless; generic mode only on virtio_net |
-| nftables | Stateful: conntrack, scanner and flooder sets, bait ports | Runs after the stack allocates the packet |
+| OVH edge firewall | Stops traffic before it reaches me | It is stateless, and it does not see attackers inside OVH |
+| XDP filter | Cheapest way to drop packets on the host | It has no memory of connections |
+| nftables | Tracks connections, flags scanners | Runs after the kernel has already handled the packet |
+| The server | Final say | Weakest place to fight a flood |
 
-## XDP decision order (`fortress_xdp.c`)
-1. Truncated, fragment, bogon source, non-TCP/UDP/ICMP: drop.
-2. DHCP and DHCPv6 exempt (checked before the bogon rule).
-3. UDP: port 0 drop, shaped fast lane for 41641, bait ports drop,
-   per-source bucket, class valve (replies vs other), global ceiling.
-4. TCP: allowlisted SSH and game ports pass, RCON/bait/privileged ports drop,
-   bare SYN sampled, zero-payload segments rate limited, global ceiling.
-5. Everything else passes to nftables.
+## What the XDP filter checks, in order
+1. Damaged, fragmented or oddly-sourced packets are dropped (private and reserved
+   source addresses, unknown protocols).
+2. DHCP is let through first, because it legitimately comes from private addresses.
+3. UDP: port zero is dropped, my VPN port gets a fast lane (only for packets that
+   look like real tunnel traffic), bait ports are dropped, then each source and
+   each type of UDP gets a rate limit, then an overall ceiling.
+4. TCP: allowed services pass, remote-admin and bait ports are dropped, SYNs are
+   sampled, empty acknowledgements are rate limited, then the overall ceiling.
+5. Whatever is left goes to nftables.
 
-Token buckets use LRU hash maps for per-source state and a small array for
-the shared "valves". Counters are per-CPU and read with `xdp-stats`.
+Rate limits are token buckets: each source gets a small allowance that refills at a
+steady rate. Counters are kept per CPU and read with `xdp-stats`.
 
-## Design decisions
-- **Fail soft on shape checks.** A packet that fails the Tailscale shape check
-  is treated as ordinary unsolicited UDP, not dropped outright.
-- **Generic XDP.** Native mode is not available on this virtio_net setup.
-- **Bait ports.** Touching a bait port puts the source into `scanners4`.
-- **Conntrack strict.** `nf_conntrack_tcp_loose=0` turns mid-stream ACK floods
-  into invalid packets, which are dropped.
-- **Rollback-first deploys.** `load.sh on` auto-detaches unless confirmed, so a
-  bad filter cannot lock out SSH.
-- **Persistence by drop-in.** Runtime changes live in `/etc/nftables.d/zz-*.nft`
-  using `insert rule` / `add element`, so the base file stays clean.
+## Choices I made and why
+- **Soft failure on the tunnel check.** A packet that fails the shape check is
+  treated as ordinary UDP, not dropped. A wrong guess here would cut me off.
+- **Generic XDP.** The VPS network driver (virtio_net, one queue) cannot run native
+  mode.
+- **Bait ports.** Anyone who touches one gets added to a scanner list.
+- **Strict connection tracking.** `nf_conntrack_tcp_loose=0` makes mid-stream ACK
+  floods count as invalid, so they get dropped.
+- **Rollback on every load.** `load.sh on` detaches the filter by itself after a
+  timer unless I confirm it, so a bad version cannot lock me out of SSH.
+- **Changes live in small files.** Runtime changes sit in `/etc/nftables.d/zz-*.nft`
+  so the main rules file stays clean.
 
-## Threat model
-Covered: floods of UDP, SYN, bare ACK and NULL packets; port scans; spoofed
-bogon sources. Not covered: terabit volumetric floods (provider scrubbing
-only), application-layer attacks, attackers inside the provider network that
-bypass the edge firewall.
+## What it covers
+UDP, SYN, bare ACK and NULL-flag floods, port scans, and spoofed private-address
+sources. It does not cover terabit-scale floods (that needs the provider),
+application-layer attacks, or attackers inside the provider network that bypass the
+edge firewall in ways the host cannot see.

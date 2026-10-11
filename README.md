@@ -1,86 +1,102 @@
 # ovh-fortress
 
-DDoS hardening for a small OVH VPS (2 vCPU, virtio_net) that doubles as a
-Tailscale exit node. Two layers on the host, plus the provider's edge firewall:
+I run a small cloud server (a VPS at OVH) that I use as a VPN exit point. Someone
+rented a stresser service and started flooding it with junk traffic, hoping to knock
+it offline. I used the attack as a live problem to solve: I wrote a packet filter
+that runs inside the Linux kernel, tightened the firewall rules around it, built a
+dashboard to watch it all, and tested each change against floods of more than
+500,000 packets per second.
 
-| Layer | Where | Job |
+This repo is the code, the configs, my notes from the incident, and the test logs.
+
+## What happened, in plain terms
+- The attack came from inside OVH's own network, so OVH's edge firewall could not
+  see it as "outside" traffic. Most of the defense had to run on my server.
+- OVH's dashboard labeled the traffic as UDP floods, TCP NULL packets and "other".
+  I was told roughly 200 Mbit/s and 200,000 packets per second were hitting the
+  server, and that about 285,000 packets per second were getting through even with
+  OVH's own protection on.
+- I wrote an eBPF/XDP filter that throws away bad packets before the operating
+  system spends any effort on them, and put nftables firewall rules behind it for
+  the traffic that needs tracking.
+- Along the way I found and fixed bugs in my own work. One version broke DHCP, one
+  dropped real upload traffic, and the OVH firewall was quietly blocking all UDP
+  replies, which broke Discord voice through the VPN. The full list is in
+  `docs/TROUBLESHOOTING.md`.
+
+## Results
+I have two kinds of evidence, and I keep them separate on purpose.
+
+**1. The live attack.** Real, on the real server. Details and what I can and cannot
+prove are in `docs/INCIDENT-REPORT.md`. One thing to be clear about: my final filter
+(v8) went on after the biggest burst, so I do not claim it was proven against that
+specific attack.
+
+**2. A replay test.** I loaded the compiled filter into the kernel and fired
+synthetic floods at it, five seconds each. Full output is in
+`docs/test-logs/ftest-v8.log`.
+
+| Flood | Packets per second | Dropped before reaching the firewall |
 |---|---|---|
-| OVH Edge Network Firewall | OVH panel | Coarse stateless allow-list before traffic reaches the VPS |
-| XDP / eBPF (`xdp/fortress_xdp.c`) | `ens3`, generic mode | Stateless token-bucket pre-filter, runs before the kernel stack |
-| nftables (`nftables.d/`) | `inet ovh_fortress` | Stateful rules: netdev ingress, input, forward, bait ports |
+| TCP NULL | 703,000 | 100.00% |
+| SYN, forged sources | 662,000 | 99.89% |
+| UDP, one source | 648,000 | 98.92% |
+| UDP, random ports | 575,000 | 95.18% |
+| UDP to the VPN port | 555,000 | 95.02% |
+| Bare ACK | 614,000 | 93.27% |
 
-`monitor/clueless.py` is a terminal dashboard that polls the VPS over SSH and
-shows what each layer is dropping.
+My own tunnel traffic, downloads and DNS kept working at 100% during every flood.
+During the spread-out UDP floods, voice-style traffic dropped to 6-9% delivered,
+and upload acknowledgements fell to 9% during the ACK flood. That is the weak spot
+in this version, and fixing it is the next piece of work (see `docs/TROUBLESHOOTING.md`).
 
-## What the XDP filter does (v8)
-- Drops bogons, fragments, bad TCP flags, TCP NULL/XMAS, privileged-port junk.
-- Per-source and shared token buckets for UDP, bare ACKs, SYN sampling, ICMP.
-- Class valves: UDP replies (sport 53/123/443/3478) vs other unsolicited UDP.
-- Tailscale fast lane on UDP 41641, gated by a WireGuard/disco/STUN shape check.
-- DHCP/DHCPv6 exempt. Bait ports drop and feed the nftables scanner set.
+The replay test measures the filter's decisions. It does not include the cost of the
+network card, and it is not a capture of the live attack.
 
-Generic XDP only: virtio_net on this VPS has one queue and no native XDP.
-
-## Live incident
-This was built during a real DDoS against the VPS by an attacker inside OVH's network.
-See `docs/INCIDENT-REPORT.md` for the timeline, what was observed on OVH's dashboard
-and on the host, and exactly what is and isn't proven.
-
-## Tested (BPF_PROG_TEST_RUN, forked workers, 555k-703k pps)
-These numbers are the synthetic replay, separate from the live attack. They come from `xdp/ftest.py`, which loads the compiled object through the
-real kernel verifier and replays synthetic packets with `BPF_PROG_TEST_RUN`. That
-measures the program's drop decisions at high packet rates. It does not include NIC or
-driver cost in generic XDP mode, and it is not a capture of the live attack.
-
-| Flood (5 s each) | Attack rate | Dropped in XDP | Your traffic during the flood |
-|---|---|---|---|
-| TCP NULL | 703k pps | 100.00% | all flows 100% |
-| UDP, random ports | 575k pps | 95.18% | voice-style UDP 6.0% (degraded) |
-| UDP, one source | 648k pps | 98.92% | all flows 100% |
-| UDP to 41641 | 555k pps | 95.02% | voice-style UDP 8.9% (degraded) |
-| SYN, forged sources | 662k pps | 99.89% | all flows 100% |
-| Bare ACK | 614k pps | 93.27% | upload ACKs 9.1% (degraded) |
-
-Full output: `docs/test-logs/ftest-v8.log` (kernel, compiler, SHA-256 of source and
-object are recorded at the top). Reproduce with the commands below.
-
-Honest reading: the filter drops 93-100% of attack traffic at 555k-703k pps, and
-tunnel, TCP download and DNS stay at 100%. During distributed UDP and ACK floods
-the ~5-7% that passes is shared between attack and legitimate traffic, so
-voice-style UDP and upload ACKs degrade. Fixing that needs a conntrack-fed trust
-map (listed under known gaps).
-
-## Limits (be honest about them)
-- One VPS cannot absorb terabit floods. Volumetric protection is OVH's VAC.
-- OVH's edge firewall only sees traffic from outside OVH. An attacker hosted
-  inside OVH bypasses it, so the host layers matter.
-- Edge firewall: 20 rules per IP, IPv4 only, stateless.
-
-## Layout
-    xdp/            fortress_xdp.c, Makefile, load.sh (timed rollback), xdp-stats, ftest.py
-    nftables.d/     ovh-fortress.nft + persistence snippets (zz-*.nft, ovh-nat.nft)
-    systemd/        fortress-xdp.service
-    sysctl/         kernel hardening, conntrack loose mode off
-    monitor/        clueless.py dashboard, fortress-report (runs on the VPS)
-    docs/           DEPLOY.md, TROUBLESHOOTING.md
-
-All addresses in this repo are placeholders (203.0.113.10 = VPS public IP,
-100.64.0.x = tailnet). Replace them with your own.
-
-## Verification status
-| Item | Status |
+## What each piece does
+| Folder | What's in it |
 |---|---|
-| `fortress_xdp.c` compiles clean with `-Wall` | checked |
-| Verifier accepts the program | checked (1959 instructions) |
-| 31 single-packet correctness cases | passed |
-| `nft -c` on `ovh-fortress.nft`, alone and with `zz-wgblock.nft` | passed |
-| Python and shell syntax | checked |
-| systemd unit and sysctl files | run on the live VPS, not re-tested from this repo |
-| Real-world flood mitigation | observed on the VPS, not benchmarked |
+| `xdp/` | The kernel packet filter (`fortress_xdp.c`), a script that loads it with an automatic rollback, a counter reader, and the test harness |
+| `nftables.d/` | The firewall rules and the small files that keep my changes after a reboot |
+| `systemd/` | The service that loads the filter at boot |
+| `sysctl/` | Kernel network settings |
+| `monitor/` | `clueless.py`, a terminal dashboard that shows what each layer is dropping |
+| `docs/` | Architecture, setup steps, incident report, troubleshooting log, test logs |
+
+## How the defense is layered
+Traffic passes through four layers, and each one drops what it can so the next has
+less to do:
+
+1. OVH's network protection and edge firewall
+2. My XDP filter, which is fast but remembers nothing
+3. nftables, which tracks connections and handles scanners
+4. The server itself
+
+`docs/ARCHITECTURE.md` explains the order and why I made each choice.
+
+## What it cannot do
+- One small server cannot absorb a terabit-scale flood. That is the provider's job.
+- The XDP filter runs in "generic" mode because this VPS's network driver does not
+  support the faster native mode.
+- A flood still costs some of my own legitimate UDP traffic, as the table above shows.
 
 ## Build and test
-    cd xdp && make                        # needs clang, libbpf-dev, linux-libc-dev
-    sudo python3 ftest.py v8 fortress_xdp.o   # needs root and bpf(2)
+    cd xdp && make                            # needs clang, libbpf-dev, linux-libc-dev
+    sudo python3 ftest.py v8 fortress_xdp.o   # needs root
 
-## License
-MIT. See LICENSE.
+Setup on a server is in `docs/DEPLOY.md`.
+
+## Checked so far
+| Item | Status |
+|---|---|
+| Filter compiles with no warnings | yes |
+| Kernel verifier accepts it | yes (1,959 instructions) |
+| 31 single-packet correctness cases | all pass |
+| nftables file passes `nft -c` | yes |
+| Python and shell scripts parse | yes |
+| Service and sysctl files | running on my server, not re-tested from this repo |
+
+## Notes
+Addresses are placeholders. I deployed, operated and debugged this on my own infrastructure.
+
+MIT licensed.

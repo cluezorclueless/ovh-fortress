@@ -1,9 +1,9 @@
 # Troubleshooting log
 
 ## Discord voice stuck on "Checking Route" through the exit node
-Symptoms: web works, voice never connects, ping 500-900 ms, fine with the exit
-node off.
-Ruled out, in order:
+What I saw: web pages worked, voice never connected, ping was 500-900 ms, and
+everything was fine with the exit node off.
+What I ruled out, in order:
 1. Tailscale relay: tunnel was direct over IPv6.
 2. The XDP filter: same result with it detached.
 3. nftables: with XDP off, `tcpdump -i ens3 'ip and udp and not port 41641'`
@@ -11,18 +11,18 @@ Ruled out, in order:
    before nftables, so nftables was not dropping them.
 4. A Google STUN test from the VPS timed out too, so it was not Discord-specific.
 
-Root cause: the OVH Edge Network Firewall is stateless. With `Refuse IPv4 all`
+The cause: the OVH Edge Network Firewall is stateless. With `Refuse IPv4 all`
 as the last rule and nothing allowing UDP replies on high ports, every reply to
 outbound UDP was discarded. Tailscale (41641) and TCP established were allowed,
 which is why only UDP voice broke.
 
-Fix: `Authorise UDP dst 32768-60999`, and delete the UDP 51820 rules.
-Verification: the STUN test printed `REPLY OK`.
+What fixed it: `Authorise UDP dst 32768-60999`, and delete the UDP 51820 rules.
+How I checked: the STUN test printed `REPLY OK`.
 
 Test used (VPS):
     python3 -c 'import socket,os;s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.settimeout(4);s.sendto(b"\x00\x01\x00\x00\x21\x12\xa4\x42"+os.urandom(12),("stun.l.google.com",19302));print("REPLY OK",len(s.recv(999)))'
 
-Remaining: ~420-480 ms between client and VPS on the Tailscale path, same with
+Still open: ~420-480 ms between client and VPS on the Tailscale path, same with
 the filter on or off, so the delay is on the access network, not the host.
 
 ## Other fixes made
