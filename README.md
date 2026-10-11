@@ -22,6 +22,12 @@ shows what each layer is dropping.
 Generic XDP only: virtio_net on this VPS has one queue and no native XDP.
 
 ## Tested (BPF_PROG_TEST_RUN, forked workers, 650-800k pps)
+These numbers come from `xdp/ftest.py`, which loads the compiled object through the
+real kernel verifier and replays synthetic packets with `BPF_PROG_TEST_RUN`. That
+measures the program's drop decisions at high packet rates. It is **not** a test
+on a live network or against a real stresser, and it does not include NIC or
+driver cost in generic XDP mode.
+
 | Flood | Dropped before nftables |
 |---|---|
 | TCP NULL | 100% |
@@ -51,3 +57,21 @@ docs/TROUBLESHOOTING.md. 31/31 single-packet correctness cases pass.
 
 All addresses in this repo are placeholders (203.0.113.10 = VPS public IP,
 100.64.0.x = tailnet). Replace them with your own.
+
+## Verification status
+| Item | Status |
+|---|---|
+| `fortress_xdp.c` compiles clean with `-Wall` | checked |
+| Verifier accepts the program | checked (1959 instructions) |
+| 31 single-packet correctness cases | passed |
+| `nft -c` on `ovh-fortress.nft` | passed |
+| Python and shell syntax | checked |
+| systemd unit and sysctl files | run on the live VPS, not re-tested from this repo |
+| Real-world flood mitigation | observed on the VPS, not benchmarked |
+
+## Build and test
+    cd xdp && make                        # needs clang, libbpf-dev, linux-libc-dev
+    sudo python3 ftest.py v8 fortress_xdp.o   # needs root and bpf(2)
+
+## License
+MIT. See LICENSE.
