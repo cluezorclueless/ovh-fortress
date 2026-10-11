@@ -1,5 +1,10 @@
 # How it works
 
+Picture an apartment building. The internet is the street, and every packet of data
+is a visitor walking up to the door. The layers below are the building's security,
+from the road in to the apartment itself.
+
+
 ## The path a packet takes
     internet
       -> OVH network protection and edge firewall
@@ -10,7 +15,7 @@
       -> nftables input and forward rules
       -> the server
 
-Each layer drops what it can and passes the rest on. The earlier a bad packet
+Each layer turns away the visitors it can and lets the rest through to the next one. The earlier a bad packet
 dies, the less work my small 2-CPU server does for it.
 
 ## Why four layers

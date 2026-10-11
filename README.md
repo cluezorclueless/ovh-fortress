@@ -9,9 +9,32 @@ dashboard to watch it all, and tested each change against floods of more than
 
 This repo is the code, the configs, my notes from the incident, and the test logs.
 
+## The idea in one picture
+Think of my server as an apartment building, and the internet as the street outside.
+
+A DDoS attack is someone paying to send a huge crowd to my front door at once. Most of
+them are fake visitors with nothing real to deliver. They are not trying to get in.
+They just want the door so jammed that nobody real can get through.
+
+I built the building's security, in layers:
+
+| In the building | In real life | What it does |
+|---|---|---|
+| The city barricade on the road into town | OVH's network protection | Turns away obvious crowds before they reach my street |
+| A bouncer with a quick checklist | My XDP filter | Checks each visitor in a split second, no questions asked. Anyone fake, broken or showing up too often is sent away |
+| The front desk | nftables firewall | Keeps a guest list and remembers who is already inside. Knows who belongs |
+| The apartment itself | The server | Where the real work happens, kept quiet and safe |
+| A fake unlocked side door with a camera | Bait ports | Anyone who tries it goes on a watch list |
+
+The bouncer's rule of thumb is simple: every visitor gets a small number of tickets
+that refill slowly. A normal person uses one or two and never notices. A crowd member
+who tries to come in 5,000 times a second runs out almost immediately and gets turned
+away.
+
 ## What happened, in plain terms
-- The attack came from inside OVH's own network, so OVH's edge firewall could not
-  see it as "outside" traffic. Most of the defense had to run on my server.
+- The attack came from inside OVH's own network. In the picture, the troublemaker
+  was already inside the city walls, so the barricade on the road never saw them.
+  Most of the defense had to happen at my own door.
 - OVH's dashboard labeled the traffic as UDP floods, TCP NULL packets and "other".
   I was told roughly 200 Mbit/s and 200,000 packets per second were hitting the
   server, and that about 285,000 packets per second were getting through even with
@@ -95,6 +118,9 @@ Setup on a server is in `docs/DEPLOY.md`.
 | nftables file passes `nft -c` | yes |
 | Python and shell scripts parse | yes |
 | Service and sysctl files | running on my server, not re-tested from this repo |
+
+## Words you might not know
+See `docs/GLOSSARY.md`. It explains each term using the building picture.
 
 ## Notes
 Addresses are placeholders. I deployed, operated and debugged this on my own infrastructure.
