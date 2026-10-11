@@ -21,12 +21,16 @@ shows what each layer is dropping.
 
 Generic XDP only: virtio_net on this VPS has one queue and no native XDP.
 
+## Live incident
+This was built during a real DDoS against the VPS by an attacker inside OVH's network.
+See `docs/INCIDENT-REPORT.md` for the timeline, what was observed on OVH's dashboard
+and on the host, and exactly what is and isn't proven.
+
 ## Tested (BPF_PROG_TEST_RUN, forked workers, 555k-703k pps)
-These numbers come from `xdp/ftest.py`, which loads the compiled object through the
+These numbers are the synthetic replay, separate from the live attack. They come from `xdp/ftest.py`, which loads the compiled object through the
 real kernel verifier and replays synthetic packets with `BPF_PROG_TEST_RUN`. That
-measures the program's drop decisions at high packet rates. It is **not** a test
-on a live network or against a real stresser, and it does not include NIC or
-driver cost in generic XDP mode.
+measures the program's drop decisions at high packet rates. It does not include NIC or
+driver cost in generic XDP mode, and it is not a capture of the live attack.
 
 | Flood (5 s each) | Attack rate | Dropped in XDP | Your traffic during the flood |
 |---|---|---|---|
