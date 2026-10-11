@@ -122,5 +122,3 @@ this way.
 
 ## Notes
 Addresses are placeholders. I deployed, operated and debugged this on my own infrastructure.
-
-MIT licensed.
