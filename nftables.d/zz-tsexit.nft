@@ -1,0 +1,1 @@
+insert rule inet ovh_fortress forward iifname "tailscale0" oifname "ens3" counter accept comment "ts-exit-fix"

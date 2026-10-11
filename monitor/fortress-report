@@ -1,0 +1,306 @@
+#!/usr/bin/env python3
+"""Emit one JSON snapshot of the ovh_fortress firewall for the CLUELESS dashboard.
+
+Install on the VPS as /usr/local/bin/fortress-report (root:root, 0755), run as root.
+Read-only: it lists the table and reads the kernel log. It changes nothing.
+"""
+
+import json
+import os
+import re
+import socket
+import subprocess
+import time
+
+FAMILY, TABLE = "inet", "ovh_fortress"
+WAN = "ens3"
+XDP_STATS = "/usr/local/bin/xdp-stats"
+XDP_ROLLBACK_UNIT = "fortress-xdp-rollback.timer"
+PORT_WINDOW = 120      # seconds of kernel log summarised into the ports view
+LOG_PREFIX = "FORTRESS "
+POLICY_SETS = ("public_tcp_services", "emergency_ssh4", "blocklist4")
+MAX_PER_SET = int(os.environ.get("MAX_PER_SET", "2000"))  # per-IP rows sent per set; assessment always counts ALL of them. Raised so every attacker (even 1-packet probes) is logged, not just the top 200.
+RECENT = 8             # sampled log lines sent
+FLOOD_SOURCES = 2000   # this many sources, nearly all seen once, reads as forged
+
+
+def run(cmd, timeout=5):
+    try:
+        done = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, str(exc)
+    if done.returncode != 0:
+        return None, (done.stderr.strip().splitlines() or ["command failed"])[-1]
+    return done.stdout, None
+
+
+def read(path):
+    try:
+        with open(path) as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+def as_int(value, default=0):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def element(raw):
+    """One nft set element -> (value, packets, bytes, timeout, expires)."""
+    meta = {}
+    if isinstance(raw, dict) and "elem" in raw:
+        meta = raw["elem"]
+        raw = meta.get("val")
+    if isinstance(raw, dict):
+        if "prefix" in raw:
+            raw = f"{raw['prefix'].get('addr')}/{raw['prefix'].get('len')}"
+        elif "range" in raw:
+            raw = "-".join(str(part) for part in raw["range"])
+        else:
+            raw = json.dumps(raw)
+    counter = meta.get("counter") or {}
+    return (str(raw), as_int(counter.get("packets")), as_int(counter.get("bytes")),
+            meta.get("timeout"), meta.get("expires"))
+
+
+def rule_row(rule):
+    """A counted rule -> (name, chain, verdict, packets, bytes), or None to skip it."""
+    counter, verdict = None, None
+    for expr in rule.get("expr") or []:
+        if not isinstance(expr, dict):
+            continue
+        if isinstance(expr.get("counter"), dict):
+            counter = expr["counter"]
+        for word in ("drop", "accept"):
+            if word in expr:
+                verdict = word
+    if counter is None:
+        return None
+    chain = rule.get("chain", "?")
+    name = rule.get("comment")
+    if not name:
+        # Unnamed accepts are ordinary traffic; unnamed drops are still worth showing.
+        if verdict != "drop":
+            return None
+        name = f"{chain}-drop"
+    return name, chain, verdict, as_int(counter.get("packets")), as_int(counter.get("bytes"))
+
+
+def firewall(report):
+    out, error = run(["nft", "-j", "list", "table", FAMILY, TABLE])
+    if out is None:
+        report["firewall"]["loaded"] = False
+        report["error"] = error
+        return
+    try:
+        items = json.loads(out).get("nftables", [])
+    except (AttributeError, ValueError):
+        report["firewall"]["loaded"] = False
+        report["error"] = "nft returned output that was not JSON"
+        return
+    report["firewall"]["loaded"] = True
+
+    counters = {}
+    for item in items:
+        if "rule" in item:
+            row = rule_row(item["rule"])
+            if row:
+                name, chain, verdict, packets, size = row
+                entry = counters.setdefault(
+                    name, {"rule": name, "chain": chain, "verdict": verdict, "packets": 0, "bytes": 0}
+                )
+                entry["packets"] += packets
+                entry["bytes"] += size
+    report["counters"] = list(counters.values())
+
+    seen = {}
+    for item in items:
+        nft_set = item.get("set")
+        if not nft_set:
+            continue
+        name = nft_set.get("name", "?")
+        flags = nft_set.get("flags") or []
+        flags = [flags] if isinstance(flags, str) else flags
+        elements = [element(raw) for raw in nft_set.get("elem") or []]
+        if name in POLICY_SETS:
+            report["policy"][name] = [value for value, _, _, _, _ in elements]
+        # Every dynamic set with a timeout is an observation set, so sets added
+        # to the ruleset later show up here without touching this script.
+        if "dynamic" in flags and nft_set.get("timeout"):
+            rows = []
+            for value, packets, nbytes, timeout, expires in elements:
+                timeout = timeout if timeout is not None else nft_set.get("timeout")
+                age = as_int(timeout) - as_int(expires) if expires is not None else None
+                avg = nbytes // packets if packets else 0
+                rows.append({"value": value, "packets": packets, "bytes": nbytes,
+                             "avg_bytes": avg, "last_seen_seconds_ago": age})
+                seen[value] = seen.get(value, 0) + packets
+            rows.sort(key=lambda row: row["packets"], reverse=True)
+            report["observations"][name] = rows[:MAX_PER_SET]
+
+    sources = len(seen)
+    packets = sum(seen.values())
+    repeat = sum(1 for count in seen.values() if count >= 4)
+    single = sum(1 for count in seen.values() if count <= 1)
+    if not sources:
+        verdict = "quiet"
+    elif sources >= FLOOD_SOURCES and single / sources >= 0.9:
+        verdict = "likely spoofed flood"
+    elif repeat >= 3:
+        verdict = "persistent scanning"
+    else:
+        verdict = "background noise"
+    report["assessment"] = {
+        "sources": sources, "packets": packets, "repeat_sources": repeat,
+        "single_packet_sources": single,
+        "packets_per_source": round(packets / sources, 2) if sources else 0,
+        "verdict": verdict,
+    }
+
+
+def recent():
+    out, _ = run(["journalctl", "-k", "-n", "400", "-o", "short-iso", "--no-pager"])
+    events = []
+    for line in (out or "").splitlines():
+        at = line.find(LOG_PREFIX)
+        if at == -1:
+            continue
+        detail = line[at + len(LOG_PREFIX):]
+        fields = dict(re.findall(r"\b(SRC|DPT|PROTO)=(\S+)", detail))
+        stamp = re.match(r"\d{4}-\d{2}-\d{2}T(\d{2}:\d{2}:\d{2})", line)
+        events.append({
+            "ts": stamp.group(1) if stamp else "--:--:--",
+            "kind": detail.split(" ", 1)[0].lower() or "drop",
+            "src": fields.get("SRC"),
+            "dst_port": fields.get("DPT"),
+            "proto": (fields.get("PROTO") or "").lower() or None,
+        })
+    return events[-RECENT:]
+
+
+def ports_seen(window=PORT_WINDOW):
+    """Which ports the sampled drops were aimed at, and which sources hit them.
+
+    The firewall logs a few packets per second, so these are proportions,
+    not totals.
+    """
+    out, _ = run(["journalctl", "-k", "--since", f"{window} seconds ago", "-o", "cat", "--no-pager"], timeout=8)
+    ports, pairs = {}, {}
+    for line in (out or "").splitlines():
+        if LOG_PREFIX not in line:
+            continue
+        fields = dict(re.findall(r"\b(SRC|DPT|PROTO)=(\S+)", line))
+        src, dpt = fields.get("SRC"), fields.get("DPT")
+        if not src or not dpt:
+            continue
+        key = f"{(fields.get('PROTO') or '?').lower()}/{dpt}"
+        ports[key] = ports.get(key, 0) + 1
+        pairs[(src, key)] = pairs.get((src, key), 0) + 1
+
+    def top(table, count):
+        return sorted(table.items(), key=lambda item: item[1], reverse=True)[:count]
+
+    return {
+        "window": window,
+        "ports": [{"port": key, "hits": hits} for key, hits in top(ports, 10)],
+        "pairs": [{"src": src, "port": key, "hits": hits} for (src, key), hits in top(pairs, 40)],
+    }
+
+
+def xdp():
+    """State of the XDP filter on the WAN interface, with its counters."""
+    state = {"loaded": False, "mode": None, "rollback_armed": False, "counters": {}}
+    out, _ = run([XDP_STATS, "--json"])
+    try:
+        stats = json.loads(out or "{}")
+    except ValueError:
+        stats = {}
+    if isinstance(stats, dict) and stats.get("loaded"):
+        state["loaded"] = True
+        state["counters"] = {str(k): as_int(v) for k, v in (stats.get("counters") or {}).items()}
+    link, _ = run(["ip", "-o", "-d", "link", "show", "dev", WAN])
+    words = (link or "").split()
+    for word, mode in (("xdpgeneric", "generic"), ("xdpoffload", "offload"), ("xdp", "native")):
+        if word in words:
+            state["mode"] = mode
+            break
+    # A program can be loaded without being attached; only the link shows that.
+    state["loaded"] = state["loaded"] and state["mode"] is not None
+    active, _ = run(["systemctl", "is-active", XDP_ROLLBACK_UNIT])
+    state["rollback_armed"] = (active or "").strip() == "active"
+    return state
+
+
+def interface():
+    base = f"/sys/class/net/{WAN}/statistics/"
+    return {
+        "name": WAN,
+        "rx_bytes": as_int(read(base + "rx_bytes")), "tx_bytes": as_int(read(base + "tx_bytes")),
+        "rx_packets": as_int(read(base + "rx_packets")), "tx_packets": as_int(read(base + "tx_packets")),
+    }
+
+
+def cpu():
+    """Cumulative CPU time, and the share of it spent handling packets."""
+    fields = read("/proc/stat").splitlines()[0].split()[1:] if read("/proc/stat") else []
+    ticks = [as_int(value) for value in fields]
+    return {"total": sum(ticks[:8]), "softirq": ticks[6] if len(ticks) > 6 else 0}
+
+
+def wireguard():
+    out, _ = run(["wg", "show", "all", "dump"])
+    now = int(time.time())
+    peers = []
+    for line in (out or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) != 9:  # interface lines have 5 fields; keys are never emitted
+            continue
+        last = as_int(parts[5])
+        peers.append({
+            "interface": parts[0],
+            "endpoint": None if parts[3] == "(none)" else parts[3],
+            "allowed_ips": parts[4],
+            "last_handshake": last or None,
+            "handshake_age": now - last if last else None,
+            "rx_bytes": as_int(parts[6]),
+            "tx_bytes": as_int(parts[7]),
+        })
+    return peers
+
+
+def main():
+    report = {
+        "schema": 2,
+        "host": socket.gethostname(),
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "firewall": {"loaded": False, "table": f"{FAMILY} {TABLE}"},
+        "counters": [],
+        "observations": {},
+        "assessment": {},
+        "policy": {},
+        "recent": [],
+        "wireguard": [],
+    }
+    firewall(report)
+    report["recent"] = recent()
+    report["wireguard"] = wireguard()
+    report["ports"] = ports_seen()
+    report["xdp"] = xdp()
+    report["net"] = interface()
+    report["cpu"] = cpu()
+    report["conntrack"] = {
+        "count": as_int(read("/proc/sys/net/netfilter/nf_conntrack_count")),
+        "max": as_int(read("/proc/sys/net/netfilter/nf_conntrack_max")),
+    }
+    report["uptime_seconds"] = as_int(float(read("/proc/uptime").split()[0] or 0)) if read("/proc/uptime") else 0
+    report["loadavg"] = read("/proc/loadavg").split()[:3]
+    print(json.dumps(report, separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

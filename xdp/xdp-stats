@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""Print the fortress_xdp drop counters. Read-only; run as root.
+
+  xdp-stats            one snapshot
+  xdp-stats -w         refresh every 2 seconds with per-second rates
+  xdp-stats --json     one JSON object, for fortress-report
+
+Reads the per-CPU 'stats' array through bpftool and sums across CPUs.
+The names below follow the stats enum in fortress_xdp.c, in the same order.
+"""
+import json
+import subprocess
+import sys
+import time
+
+NAMES = ["pass", "trunc", "bogon", "frag", "other-proto", "badflags", "bait-tcp",
+         "ssh", "mc", "syn-rate", "bait-udp", "udp-rate", "icmp-rate", "ipv6-tcp",
+         "ack-rate", "priv", "global", "udp-valve"]
+PROG = "fortress_xdp"
+MAP = "stats"
+
+
+def run(args):
+    try:
+        done = subprocess.run(args, capture_output=True, text=True, timeout=6)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        return None
+    return done.stdout
+
+
+def le_bytes(tokens):
+    """bpftool prints a value as ['0x2a','0x00',...] little-endian; fold to int."""
+    value = 0
+    for shift, token in enumerate(tokens):
+        try:
+            value |= (int(token, 16) & 0xFF) << (8 * shift)
+        except (TypeError, ValueError):
+            return 0
+    return value
+
+
+def loaded():
+    out = run(["bpftool", "-j", "prog", "show"])
+    try:
+        progs = json.loads(out or "[]")
+    except ValueError:
+        return False
+    return any(isinstance(p, dict) and p.get("name") == PROG for p in progs)
+
+
+def read_counts():
+    """{name: total across CPUs}, or None if the map can't be read."""
+    out = run(["bpftool", "-j", "map", "dump", "name", MAP])
+    try:
+        rows = json.loads(out or "null")
+    except ValueError:
+        return None
+    if not isinstance(rows, list):
+        return None
+    counts = {name: 0 for name in NAMES}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        index = le_bytes(row.get("key", []))
+        if not 0 <= index < len(NAMES):
+            continue
+        if isinstance(row.get("values"), list):          # per-CPU map
+            total = sum(le_bytes(cpu.get("value", [])) for cpu in row["values"]
+                        if isinstance(cpu, dict))
+        else:                                            # single value fallback
+            total = le_bytes(row.get("value", []))
+        counts[NAMES[index]] = total
+    return counts
+
+
+def table(counts, rates=None):
+    dropped = sum(v for k, v in counts.items() if k != "pass")
+    total = dropped + counts.get("pass", 0)
+    lines = [f"{'counter':14} {'packets':>14}" + (f" {'per second':>12}" if rates else "")]
+    for name in NAMES:
+        if counts.get(name) or name == "pass":
+            line = f"{name:14} {counts.get(name, 0):>14,}"
+            if rates:
+                line += f" {rates.get(name, 0):>12,.0f}"
+            lines.append(line)
+    share = 100 * dropped / total if total else 0
+    lines.append(f"{'dropped':14} {dropped:>14,}  ({share:.1f}% of {total:,} seen)")
+    return "\n".join(lines)
+
+
+def main():
+    counts = read_counts()
+    if counts is None or not loaded():
+        if "--json" in sys.argv:
+            print(json.dumps({"loaded": False}))
+            return 0
+        if run(["bpftool", "version"]) is None:
+            sys.exit("xdp-stats: bpftool not found (sudo apt-get install -y bpftool)")
+        sys.exit("xdp-stats: fortress_xdp is not loaded")
+    if "--json" in sys.argv:
+        print(json.dumps({"loaded": True, "counters": counts}, separators=(",", ":")))
+    elif "-w" in sys.argv:
+        try:
+            while True:
+                time.sleep(2)
+                now = read_counts() or counts
+                rates = {k: (now.get(k, 0) - counts.get(k, 0)) / 2 for k in NAMES}
+                print("\033[2J\033[H" + table(now, rates), flush=True)
+                counts = now
+        except KeyboardInterrupt:
+            pass
+    else:
+        print(table(counts))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

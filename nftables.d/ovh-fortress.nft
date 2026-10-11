@@ -1,0 +1,133 @@
+#!/usr/sbin/nft -f
+define WAN = "ens3"
+define WG_IF = "wg0"
+define TS_IF = "tailscale0"
+define WG_PORT = 51820
+define TS_PORT = 41641
+define WG_NET = 10.66.66.0/24
+define MC_PORT = 25565
+destroy table inet ovh_fortress
+table inet ovh_fortress {
+    set public_tcp_services { type inet_service; }
+    set emergency_ssh4 { type ipv4_addr; flags interval; }
+    set wan_bogons4 {
+        type ipv4_addr
+        flags interval
+        elements = {
+            0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8,
+            169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.0.2.0/24,
+            192.168.0.0/16, 198.18.0.0/15, 198.51.100.0/24, 203.0.113.0/24,
+            224.0.0.0/4, 240.0.0.0/4
+        }
+    }
+    set wan_bogons6 {
+        type ipv6_addr
+        flags interval
+        elements = { ::1/128, fc00::/7, 2001:db8::/32, ff00::/8 }
+    }
+    set mc_sources4 { type ipv4_addr; flags interval; }
+    set mc_unmetered4 { type ipv4_addr; flags interval; }
+    set mc_conns4 { type ipv4_addr; size 65535; flags dynamic; }
+    set blocklist4 { type ipv4_addr; flags interval; }
+    set scanners4 { type ipv4_addr; size 65535; flags dynamic; timeout 30m; counter; }
+    set flooders4 { type ipv4_addr; size 65535; flags dynamic; timeout 1h; counter; }
+    set spoofed4 { type ipv4_addr; size 16384; flags dynamic; timeout 15m; counter; }
+    set bait_tcp {
+        type inet_service
+        elements = {
+            20, 21, 23, 25, 53, 80, 110, 135, 139, 143, 161, 389,
+            443, 445, 993, 995, 1433, 1521, 2049, 3306, 3389, 5432,
+            5900, 6379, 8000, 8080, 8443, 9200, 11211, 27017
+        }
+    }
+    set bait_udp {
+        type inet_service
+        elements = { 53, 123, 137, 138, 161, 389, 1900, 5353, 11211, 19132, 27015 }
+    }
+    chain wan_ingress {
+        type filter hook ingress device $WAN priority -500; policy accept;
+        meta protocol ip ip saddr @blocklist4 counter drop comment "wan-blocklist"
+        meta protocol ip ip saddr @wan_bogons4 update @spoofed4 { ip saddr } counter drop comment "wan-bogon4"
+        meta protocol ip6 ip6 saddr @wan_bogons6 counter drop comment "wan-bogon6"
+        meta protocol ip meta l4proto != { tcp, udp, icmp } counter drop comment "wan-other-proto"
+        meta protocol ip6 meta l4proto != { tcp, udp, ipv6-icmp } counter drop comment "wan-other-proto6"
+        tcp flags & (fin | syn) == (fin | syn) counter drop comment "wan-badflags"
+        tcp flags & (syn | rst) == (syn | rst) counter drop comment "wan-badflags"
+        tcp flags & (fin | rst) == (fin | rst) counter drop comment "wan-badflags"
+        tcp flags & (fin | syn | rst | psh | ack | urg) == 0 counter drop comment "wan-badflags"
+        tcp flags & (fin | syn | rst | psh | ack | urg) == (fin | syn | rst | psh | ack | urg) counter drop comment "wan-badflags"
+        tcp flags & (fin | psh | urg) == (fin | psh | urg) counter drop comment "wan-badflags"
+        tcp flags syn tcp flags & (fin | rst | psh | urg) != 0 counter drop comment "wan-badflags"
+        tcp flags syn tcp option maxseg size 1-535 counter drop comment "wan-bad-mss"
+        meta protocol ip ip saddr @emergency_ssh4 tcp dport 22 accept
+        meta protocol ip tcp dport 22 update @scanners4 { ip saddr } counter drop comment "wan-ssh-closed"
+        tcp dport 22 counter drop comment "wan-ssh-closed6"
+        meta protocol ip ip saddr @mc_sources4 tcp dport $MC_PORT accept comment "mc-ingress-pass"
+        meta protocol ip tcp dport $MC_PORT tcp dport != @public_tcp_services update @scanners4 { ip saddr } counter drop comment "mc-ingress-drop"
+        tcp dport $MC_PORT tcp dport != @public_tcp_services counter drop comment "mc-ingress-drop6"
+        tcp dport 25575 counter drop comment "mc-rcon-ingress"
+        tcp flags & (syn | ack) != syn tcp dport @public_tcp_services accept
+        meta protocol ip tcp dport @bait_tcp update @scanners4 { ip saddr } counter drop comment "wan-bait-tcp"
+        tcp dport @bait_tcp counter drop comment "wan-bait-tcp6"
+        meta protocol ip6 tcp flags & (syn | ack) == syn counter drop comment "wan-closed-port6"
+        meta protocol ip tcp flags & (syn | ack) == syn tcp dport != @public_tcp_services update @scanners4 { ip saddr } counter drop comment "wan-closed-port"
+        meta protocol ip tcp flags & (syn | ack) == syn meter wan_syn4 { ip saddr limit rate over 60/second burst 120 packets } update @flooders4 { ip saddr } counter drop comment "wan-syn-flood"
+        meta protocol ip udp dport @bait_udp update @scanners4 { ip saddr } counter drop comment "wan-bait-udp"
+        udp dport @bait_udp counter drop comment "wan-bait-udp6"
+        udp dport { 68, 51820, 41641, 546 } accept
+        meta protocol ip meta l4proto udp meter wan_udp4 { ip saddr limit rate over 200/second burst 400 packets } update @flooders4 { ip saddr } counter drop comment "wan-udp-flood"
+        meta protocol ip6 meta l4proto udp meter wan_udp6 { ip6 saddr limit rate over 200/second burst 400 packets } counter drop comment "wan-udp-flood6"
+    }
+    chain input {
+        type filter hook input priority 10; policy drop;
+        iifname "lo" counter accept
+        ct state invalid counter drop comment "wan-invalid"
+        iifname $WAN tcp flags ack / syn,ack ct state new update @flooders4 { ip saddr } counter drop comment "wan-ack-flood"
+        iifname $WAN tcp flags rst ct state new update @flooders4 { ip saddr } counter drop comment "wan-rst-flood"
+        iifname $WAN tcp flags fin ct state new update @flooders4 { ip saddr } counter drop comment "wan-fin-flood"
+        iifname $WAN tcp flags psh ct state new update @flooders4 { ip saddr } counter drop comment "wan-psh-flood"
+        tcp flags & (fin | syn | rst | ack) != syn ct state new counter drop comment "wan-nonsyn-new"
+        ct state established,related counter accept
+        iifname $WAN meta l4proto udp ct state new udp dport != { 68, 51820, 41641 } update @scanners4 { ip saddr } counter drop comment "wan-udp-unsolicited"
+        iifname $WAN meta l4proto != { tcp, udp, icmp, ipv6-icmp } counter drop comment "wan-other-proto"
+        iifname $WAN meta protocol ip udp sport 67 udp dport 68 counter accept
+        iifname $WAN meta protocol ip6 udp sport 547 udp dport 546 counter accept
+        iifname $WAN meta protocol ip icmp type { destination-unreachable, time-exceeded, parameter-problem } limit rate 200/second burst 400 packets counter accept
+        iifname $WAN meta protocol ip icmp type echo-request limit rate 10/second burst 20 packets counter accept comment "wan-icmp-echo"
+        iifname $WAN meta protocol ip6 icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } limit rate 200/second burst 400 packets counter accept
+        iifname $WAN meta protocol ip6 icmpv6 type echo-request limit rate 10/second burst 20 packets counter accept
+        iifname $WAN meta protocol ip udp dport $WG_PORT meter wg4 { ip saddr limit rate over 3000/second burst 6000 packets } counter drop
+        iifname $WAN meta protocol ip6 udp dport $WG_PORT meter wg6 { ip6 saddr limit rate over 3000/second burst 6000 packets } counter drop
+        iifname $WAN udp dport $WG_PORT counter accept comment "wan-wireguard"
+        iifname $WAN meta protocol ip udp dport $TS_PORT meter ts4 { ip saddr limit rate over 3000/second burst 6000 packets } counter drop
+        iifname $WAN meta protocol ip6 udp dport $TS_PORT meter ts6 { ip6 saddr limit rate over 3000/second burst 6000 packets } counter drop
+        iifname $WAN udp dport $TS_PORT counter accept comment "wan-tailscale"
+        iifname $WAN meta protocol ip ip saddr @emergency_ssh4 tcp dport 22 ct state new meter ssh4 { ip saddr limit rate over 6/minute burst 6 packets } counter drop
+        iifname $WAN meta protocol ip ip saddr @emergency_ssh4 tcp dport 22 ct state new counter accept
+        iifname $WAN meta protocol ip tcp dport $MC_PORT ip saddr @mc_unmetered4 ct state new counter accept comment "mc-proxy-accept"
+        iifname $WAN meta protocol ip tcp dport $MC_PORT ip saddr @mc_sources4 ct state new meter mc_syn4 { ip saddr limit rate over 10/second burst 20 packets } counter drop comment "mc-syn-flood"
+        iifname $WAN meta protocol ip tcp dport $MC_PORT ip saddr @mc_sources4 ct state new add @mc_conns4 { ip saddr ct count over 8 } counter drop comment "mc-connlimit"
+        iifname $WAN meta protocol ip tcp dport $MC_PORT ip saddr @mc_sources4 ct state new counter accept comment "mc-accept"
+        iifname $WAN tcp dport $MC_PORT tcp dport != @public_tcp_services counter drop comment "mc-unauthorized"
+        iifname $WAN udp dport $MC_PORT counter drop comment "mc-query-blocked"
+        iifname $WAN tcp dport 25575 counter drop comment "mc-rcon-blocked"
+        iifname $WG_IF ip saddr $WG_NET tcp dport { 25565, 25575 } ct state new counter accept comment "mc-admin-tunnel"
+        iifname $WAN meta protocol ip tcp dport @public_tcp_services ct state new meter service_syn4 { ip saddr limit rate over 30/second burst 60 packets } counter drop
+        iifname $WAN meta protocol ip tcp dport @public_tcp_services ct state new counter accept comment "service-accept"
+        iifname $WG_IF ip saddr $WG_NET tcp dport 22 ct state new counter accept comment "wg-ssh"
+        iifname $WG_IF ip saddr $WG_NET meta l4proto icmp counter accept
+        iifname $TS_IF tcp dport 22 ct state new counter accept
+        iifname $TS_IF meta l4proto { icmp, ipv6-icmp } counter accept
+        counter drop comment "input-fallthrough"
+    }
+    chain forward {
+        type filter hook forward priority 10; policy drop;
+        ct state invalid counter drop
+        ct state established,related counter accept
+        iifname $WG_IF ip saddr $WG_NET oifname $WAN ct state new counter accept comment "wg-fulltunnel-out"
+        # Keeps the Tailscale exit node working across a reload. Harmless if unused.
+        iifname $TS_IF oifname $WAN ct state new counter accept comment "ts-exit-node-out"
+        counter drop
+    }
+    chain output { type filter hook output priority 10; policy accept; }
+}

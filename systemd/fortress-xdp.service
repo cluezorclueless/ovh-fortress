@@ -1,0 +1,14 @@
+[Unit]
+Description=Attach fortress_xdp to the WAN interface
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=-/usr/sbin/ip link set dev ens3 xdpgeneric off
+ExecStart=/usr/sbin/ip link set dev ens3 xdpgeneric obj /opt/ovh-fortress/fortress_xdp.o sec xdp
+ExecStop=-/usr/sbin/ip link set dev ens3 xdpgeneric off
+
+[Install]
+WantedBy=multi-user.target

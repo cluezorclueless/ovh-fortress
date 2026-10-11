@@ -1,0 +1,7 @@
+table inet ovh_nat {
+    chain postrouting {
+        type nat hook postrouting priority srcnat; policy accept;
+        oifname "ens3" ip saddr 10.66.66.0/24 masquerade
+        oifname "ens3" ip saddr 100.64.0.0/10 masquerade
+    }
+}

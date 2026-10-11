@@ -1,0 +1,4 @@
+*.o
+__pycache__/
+*.bak
+*.tgz

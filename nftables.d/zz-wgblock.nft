@@ -1,0 +1,1 @@
+insert rule inet ovh_fortress wan_ingress meta l4proto { tcp, udp } th dport 51820 counter drop comment "wg-flood-block"
