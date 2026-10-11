@@ -68,11 +68,14 @@ in its final form. Provider edge firewall enabled with a deny-all tail rule.
 ## Evidence status
 | Claim | Backing |
 |---|---|
-| A real attack occurred | Provider dashboard, my screenshots |
-| ~200 Mbit/s, ~200k pps, ~285k pps accepted | Analyst reading of the provider dashboard. Attach the screenshot |
-| XDP dropping during the attack (2,134 drops, ~134k pps) | Dashboard screenshot, to attach |
-| 12,431 packets on the 51820 drop rule | Screenshot and `tcpdump`, to attach |
-| v8 drops 93-100% in replay | `docs/test-logs/ftest-v8.log` |
+| A real attack occurred | `docs/evidence/01`, `02`, `03` (provider Anti-DDoS portal) |
+| Attack mixed NULL/SYN/RST/FIN/PSH/ACK/UDP/other floods | `02` (vector lists per mitigation event) |
+| 3.45 M packets rejected by the provider on the period viewed | `03` |
+| XDP dropping during the attack (2,134 drops, ~134k pps) | `04`. The dashboard shows the earlier filter still passing about 98% of that rate |
+| 12,431 packets hit the 51820 drop rule, 1,268-byte ACKs | `06` |
+| 98.5% of 54.2 M packets seen by XDP were dropped | `05`. Counters are cumulative since the program was loaded, not one event |
+| Provider firewall had no allow for UDP replies, then fixed | `07` shows the rule table. The fix is the added UDP 32768-60999 rule |
+| v8 drops 93-100% in replay | `docs/test-logs/ftest-v8.log` (synthetic, not the live attack) |
 | **v8 mitigated the live attack end to end** | **Not shown.** v8 went on after the main burst. Later readings were quiet |
 | Voice restored | UDP reply test passed. ~450 ms client-to-VPS delay remained |
 
@@ -87,10 +90,15 @@ No attacker addresses are published. Observable patterns, useful for detection:
 - Mid-stream ACKs with no matching connection, 1,268-byte payloads, to 51820/tcp.
 - High-rate UDP from many sources to random high ports.
 
-## Evidence to attach
-Black out public IPs and put these in `docs/evidence/`:
-1. Provider Anti-DDoS dashboard during the attack
-2. `clueless` screenshot with drop counters
-3. First 20 lines of the 51820/tcp `tcpdump`
-4. `sudo xdp-stats` and nftables counters
-5. Provider mitigation history for the IP
+## Evidence files
+All taken Oct 3-6, 2026. Public IPs, attacker addresses and hostnames are blacked out. Photos of a screen are blurry in places and left as taken.
+
+| File | What it shows | Caveat |
+|---|---|---|
+| `01-ovh-antiddos-scrubbing-log.png` | Provider mitigation log for the VPS address | Address hidden |
+| `02-ovh-attack-vectors-list.png` | Attack vectors per event: OTHER, TCP_SYN, TCP_RST, TCP_FIN, TCP_PSH, TCP_ACK, UDP | Cropped on the left by the phone view |
+| `03-ovh-traffic-graph-packets-rejected.png` | 3.45 M packets rejected, traffic spike on 10/4/26 (UTC-5) | The tooltip shows a quiet moment, not the peak |
+| `04-clueless-dashboard-live-attack.jpg` | My dashboard during the attack, drop counters rising | Earlier filter, before v8 |
+| `05-xdp-stats-cumulative-drops.jpg` | `sudo xdp-stats`: 53,427,836 dropped, 98.5% of 54,241,893 seen | Cumulative since load |
+| `06-wg-flood-block-and-attacker-capture.jpg` | nftables `wg-flood-block` at 12,431 packets, then `tcpdump` of 1,268-byte ACKs to 51820/tcp | Phone-quality photo of a terminal |
+| `07-ovh-edge-firewall-rules.png` | Provider edge firewall rules, ending in "Refuse IPv4 all" | Rule details cut off at the right edge |

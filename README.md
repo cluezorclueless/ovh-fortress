@@ -16,7 +16,7 @@ pre-filter, stateful nftables policy, and a monitoring dashboard.
 | ATT&CK | Impact (TA0040): T1498 Network Denial of Service, T1498.001 Direct Network Flood |
 | Outcome | Host-side filter deployed and tuned; v8 tested to 555k-703k pps in replay |
 
-Full timeline, decisions and an evidence table are in `docs/INCIDENT-REPORT.md`.
+Full timeline, decisions and an evidence table are in `docs/INCIDENT-REPORT.md`. Redacted screenshots of the live attack are in `docs/evidence/`.
 
 ## Response, by IR phase (NIST SP 800-61)
 | Phase | What I did |
